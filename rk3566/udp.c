@@ -7,8 +7,9 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
-static int video_sock = -1;
-static struct sockaddr_in pc_addr;
+// 改为全局变量，供main.c访问
+int video_sock = -1;
+struct sockaddr_in pc_addr;
 
 // 初始化视频发送UDP
 void udp_init_video(void) {
@@ -36,7 +37,7 @@ void udp_init_video(void) {
     printf("✅ 视频UDP初始化完成 → %s:%d\n", PC_IP, VIDEO_UDP_PORT);
 }
 
-// 分片发送H264
+// 分片发送H264（保留原有函数，但main.c使用新的带序列号版本）
 void udp_send(const void *data, int len) {
     if (video_sock < 0) {
         return;

@@ -6,11 +6,15 @@
 #include <termios.h>
 #include <string.h>
 
-static int uart_fd = -1;
+// 改为全局变量，供main.c访问
+int uart_fd = -1;
 
 void uart_init(void) {
-    uart_fd = open(UART_DEV, O_RDWR | O_NOCTTY);
-    if (uart_fd < 0) return;
+    uart_fd = open(UART_DEV, O_RDWR | O_NOCTTY | O_NONBLOCK);  // 添加非阻塞模式
+    if (uart_fd < 0) {
+        perror("UART open failed");
+        return;
+    }
 
     struct termios opt;
     tcgetattr(uart_fd, &opt);

@@ -27,6 +27,20 @@ static AVFrame *frame = NULL;
 static AVPacket *pkt = NULL;
 static struct SwsContext *sws_ctx = NULL;
 
+
+/**
+ * @brief 初始化并打开摄像头设备
+ * 
+ * 该函数负责完成摄像头的完整初始化流程，包括：
+ * 1. 打开视频设备文件
+ * 2. 设置视频捕获格式（分辨率和像素格式）
+ * 3. 请求V4L2缓冲区
+ * 4. 对缓冲区进行内存映射
+ * 5. 将缓冲区加入捕获队列
+ * 6. 启动视频流
+ * 
+ * @return int 成功返回0，失败返回-1
+ */
 static int open_camera()
 {
     cap_fd = open(VIDEO_DEVICE, O_RDWR | O_NONBLOCK);
@@ -35,6 +49,7 @@ static int open_camera()
         return -1;
     }
 
+    // 设置视频捕获格式
     struct v4l2_format fmt = {0};
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     fmt.fmt.pix.width = VIDEO_WIDTH;
@@ -47,6 +62,7 @@ static int open_camera()
         return -1;
     }
 
+    // 请求V4L2缓冲区
     struct v4l2_requestbuffers req = {0};
     req.count = CAPTURE_COUNT;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -58,6 +74,7 @@ static int open_camera()
         return -1;
     }
 
+    // 对每个缓冲区进行内存映射并加入队列
     for (int i = 0; i < CAPTURE_COUNT; i++) {
         struct v4l2_buffer buf = {0};
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -85,6 +102,7 @@ static int open_camera()
         }
     }
 
+    // 启动视频流
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (ioctl(cap_fd, VIDIOC_STREAMON, &type) < 0) {
         perror("streamon");
@@ -95,6 +113,7 @@ static int open_camera()
     printf("✅ 摄像头初始化成功：%dx%d\n", VIDEO_WIDTH, VIDEO_HEIGHT);
     return 0;
 }
+
 
 static int init_ffmpeg_encoder()
 {
