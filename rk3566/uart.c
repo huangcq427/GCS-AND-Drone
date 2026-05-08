@@ -33,6 +33,6 @@ void uart_init(void) {
 
 void uart_send_rtf_mode(void) {
     const char *cmd = "MODE 4\n";
-    (void)write(uart_fd, cmd, strlen(cmd));  // 修复警告
+    (void)write(uart_fd, cmd, strlen(cmd));  
     printf("Sent RTF mode to flight controller\n");
 }

@@ -5,6 +5,10 @@
 #include <QImage>
 #include <QDateTime>
 #include <QDebug>
+#include <QStandardPaths>
+#include <QLabel>
+#include <QDialog>
+#include <QDialogButtonBox>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -27,10 +31,9 @@ MainWindow::MainWindow(QWidget *parent)
     m_lastW = 0;
     m_lastH = 0;
 
-    // UI
     m_videoLabel = new QLabel;
     m_btnRtf  = new QPushButton("发送RTF返航指令");
-    m_btnSave = new QPushButton("开始保存视频");
+    m_btnSave = new QPushButton("开始录制");
 
     QHBoxLayout* btnLayout = new QHBoxLayout;
     btnLayout->addWidget(m_btnRtf);
@@ -44,31 +47,24 @@ MainWindow::MainWindow(QWidget *parent)
     central->setLayout(mainLayout);
     setCentralWidget(central);
 
-    // UDP 接收视频
     m_udpRecv = new QUdpSocket(this);
     if (!m_udpRecv->bind(VIDEO_RECV_PORT, QUdpSocket::ShareAddress)) {
         QMessageBox::warning(this, "警告", "视频端口绑定失败！");
     }
     connect(m_udpRecv, &QUdpSocket::readyRead, this, &MainWindow::onUdpRecv);
 
-    // UDP 发送命令
     m_udpSend = new QUdpSocket(this);
 
-    // 按钮
     connect(m_btnRtf, &QPushButton::clicked, this, &MainWindow::btnSendRtf);
     connect(m_btnSave, &QPushButton::clicked, this, &MainWindow::btnStartSave);
 
-    // 初始化FFmpeg解码
     initFFmpeg();
-
-    qDebug("===== 地面站已启动 =====");
+    qDebug() << "地面站启动完成 ✅";
 }
 
 MainWindow::~MainWindow()
 {
-    if (m_isSaving)
-        btnStopSave();
-
+    if (m_isSaving) btnStopSave();
     av_packet_free(&m_pkt);
     av_frame_free(&m_frame);
     avcodec_free_context(&m_codecCtx);
@@ -96,7 +92,6 @@ void MainWindow::initFFmpeg()
 
     m_pkt = av_packet_alloc();
     m_frame = av_frame_alloc();
-    qDebug("FFmpeg 初始化成功");
 }
 
 void MainWindow::onUdpRecv()
@@ -105,13 +100,9 @@ void MainWindow::onUdpRecv()
         QByteArray data;
         data.resize(m_udpRecv->pendingDatagramSize());
         QHostAddress sender;
-        quint16 senderPort;
-        m_udpRecv->readDatagram(data.data(), data.size(), &sender, &senderPort);
-
-        if (data.startsWith("RTF_MODE")) {
-            continue;
-        }
-
+        quint16 port;
+        m_udpRecv->readDatagram(data.data(), data.size(), &sender, &port);
+        if (data.startsWith("RTF_MODE")) continue;
         processVideoPacket(data);
     }
 }
@@ -121,43 +112,39 @@ void MainWindow::processVideoPacket(const QByteArray& packet)
     const int HEAD_LEN = 6;
     if (packet.size() <= HEAD_LEN) return;
 
-    // 解析包头
     uint32_t frameSeq;
     memcpy(&frameSeq, packet.data(), 4);
     frameSeq = ntohl(frameSeq);
 
-    uint8_t sliceSeq   = (uint8_t)packet[4];
-    uint8_t totalSlice = (uint8_t)packet[5];
+    uint8_t sliceSeq = packet[4];
+    uint8_t totalSlice = packet[5];
     QByteArray sliceData = packet.mid(HEAD_LEN);
 
-    // 组包
     FrameBuf &fb = m_frameBufMap[frameSeq];
     if (fb.data.isEmpty()) {
         fb.totalSlice = totalSlice;
-        fb.recvSlice  = 0;
+        fb.recvSlice = 0;
         fb.data.clear();
     }
 
     fb.data.append(sliceData);
     fb.recvSlice++;
 
-    // 收满整帧，开始解码
     if (fb.recvSlice == fb.totalSlice) {
-        qDebug() << "重组完整帧 seq:" << frameSeq 
-                 << " size:" << fb.data.size();
         decodeH264(fb.data);
         m_frameBufMap.remove(frameSeq);
     }
 
-    // 限制缓存数量，防内存暴涨
-    if (m_frameBufMap.size() > 8) {
-        m_frameBufMap.clear();
-    }
+    if (m_frameBufMap.size() > 8) m_frameBufMap.clear();
 }
 
 void MainWindow::decodeH264(const QByteArray& data)
 {
     if (!m_codecCtx || !m_pkt || !m_frame) return;
+
+    if (m_isSaving && m_h264File.isOpen()) {
+        m_h264File.write(data);
+    }
 
     av_packet_unref(m_pkt);
     m_pkt->data = (uint8_t*)data.constData();
@@ -170,10 +157,7 @@ void MainWindow::decodeH264(const QByteArray& data)
     {
         int w = m_frame->width;
         int h = m_frame->height;
-        if (w <= 0 || h <= 0) {
-            av_frame_unref(m_frame);
-            continue;
-        }
+        if (w <= 0 || h <= 0) { av_frame_unref(m_frame); continue; }
 
         if (!m_sws || m_lastW != w || m_lastH != h) {
             sws_freeContext(m_sws);
@@ -189,58 +173,94 @@ void MainWindow::decodeH264(const QByteArray& data)
         int stride[] = { (int)img.bytesPerLine() };
         sws_scale(m_sws, m_frame->data, m_frame->linesize, 0, h, dest, stride);
 
-        QPixmap pix = QPixmap::fromImage(img);
-        m_videoLabel->setPixmap(pix.scaled(m_videoLabel->size(), 
-            Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        m_videoLabel->setPixmap(QPixmap::fromImage(img).scaled(m_videoLabel->size(),
+                            Qt::KeepAspectRatio, Qt::SmoothTransformation));
         m_videoLabel->setAlignment(Qt::AlignCenter);
 
         av_frame_unref(m_frame);
     }
 }
 
-void MainWindow::resizeEvent(QResizeEvent *event)
+// ===================== 自定义完美弹窗 =====================
+void MainWindow::showCustomMessageBox(const QString &title, const QString &text)
 {
-    QMainWindow::resizeEvent(event);
-    if (!m_videoLabel->pixmap().isNull()) {
-        QPixmap p = m_videoLabel->pixmap();
-        m_videoLabel->setPixmap(p.scaled(m_videoLabel->size(), 
-            Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    }
+    QDialog dialog(this);
+    dialog.setWindowTitle(title);
+
+    QLabel label(text);
+    label.setAlignment(Qt::AlignCenter);
+    label.setWordWrap(true);
+
+    QDialogButtonBox btnBox(QDialogButtonBox::Ok);
+    connect(&btnBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+
+    QVBoxLayout layout;
+    layout.addWidget(&label);
+    layout.addWidget(&btnBox);
+    dialog.setLayout(&layout);
+
+    dialog.adjustSize();
+    dialog.exec();
 }
 
-void MainWindow::btnSendRtf()
-{
-    QByteArray cmd = "RTF_MODE";
-    m_udpSend->writeDatagram(cmd, QHostAddress(RK_IP), CMD_SEND_PORT);
-    QMessageBox::information(this, "指令", "已发送返航指令");
-}
-
+// ===================== 开始录制 =====================
 void MainWindow::btnStartSave()
 {
     if (m_isSaving) return;
 
-    QString name = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss") + ".h264";
-    m_saveFile.setFileName(name);
+    QString desktop = QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
+    QString name = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss") + ".mp4";
+    QString path = desktop + "/" + name;
 
-    if (!m_saveFile.open(QIODevice::WriteOnly)) {
-        QMessageBox::warning(this, "错误", "保存失败");
+    m_h264File.setFileName(path);
+    if (!m_h264File.open(QIODevice::WriteOnly)) {
+        QMessageBox::warning(this, "错误", "录制失败");
         return;
     }
 
     m_isSaving = true;
-    m_btnSave->setText("停止保存视频");
+    m_btnSave->setText("停止录制");
+
+    // ✅ 完美弹窗
+    showCustomMessageBox("录制", "正在录制视频\n文件已保存到桌面");
 
     disconnect(m_btnSave, &QPushButton::clicked, this, &MainWindow::btnStartSave);
     connect(m_btnSave, &QPushButton::clicked, this, &MainWindow::btnStopSave);
 }
 
+// ===================== 停止录制 =====================
 void MainWindow::btnStopSave()
 {
     if (!m_isSaving) return;
-    m_saveFile.close();
-    m_isSaving = false;
-    m_btnSave->setText("开始保存视频");
 
-    disconnect(m_btnSave, &QPushButton::clicked, this, &MainWindow::btnStartSave);
+    // 写入一个空的 H.264 NAL 单元，强制结束画面
+    if (m_h264File.isOpen()) {
+        // 写入 00 00 00 01 09 10，是一个标准的 SEI 结束标记
+        uint8_t endMark[] = {0x00, 0x00, 0x00, 0x01, 0x09, 0x10};
+        m_h264File.write((const char*)endMark, sizeof(endMark));
+    }
+
+    m_h264File.close();
+    m_isSaving = false;
+    m_btnSave->setText("开始录制");
+
+    disconnect(m_btnSave, &QPushButton::clicked, this, &MainWindow::btnStopSave);
     connect(m_btnSave, &QPushButton::clicked, this, &MainWindow::btnStartSave);
+
+    showCustomMessageBox("完成", "录制完成！\n视频已保存到桌面");
+}
+
+void MainWindow::btnSendRtf()
+{
+    m_udpSend->writeDatagram("RTF_MODE", QHostAddress(RK_IP), CMD_SEND_PORT);
+    QMessageBox::information(this, "指令", "返航指令已发送");
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    if (!m_videoLabel->pixmap().isNull()) {
+        m_videoLabel->setPixmap(m_videoLabel->pixmap().scaled(m_videoLabel->size(),
+            Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
 }

@@ -5,9 +5,8 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QUdpSocket>
-#include <QFile>
 #include <QMap>
-#include <QByteArray>
+#include <QFile>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -40,6 +39,7 @@ private:
     void initFFmpeg();
     void processVideoPacket(const QByteArray& packet);
     void decodeH264(const QByteArray& data);
+    void showCustomMessageBox(const QString &title, const QString &text);
 
 private:
     QLabel         *m_videoLabel;
@@ -50,9 +50,8 @@ private:
     QUdpSocket     *m_udpSend;
 
     bool            m_isSaving;
-    QFile           m_saveFile;
+    QFile           m_h264File;
 
-    // FFmpeg
     AVCodec        *m_codec;
     AVCodecContext *m_codecCtx;
     AVPacket       *m_pkt;
@@ -61,7 +60,6 @@ private:
     int             m_lastW;
     int             m_lastH;
 
-    // 分片组包
     struct FrameBuf {
         QByteArray data;
         int totalSlice = 0;
@@ -70,4 +68,4 @@ private:
     QMap<uint32_t, FrameBuf> m_frameBufMap;
 };
 
-#endif // MAINWINDOW_H
+#endif
